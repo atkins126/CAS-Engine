@@ -5,26 +5,102 @@ interface
 uses
   System.SysUtils,
   System.IOUtils,
+  System.Generics.Collections,
+  Classes,
+  Windows,
   CasTrackU;
 
 type
-  TCasDecoder = class
-
+  TCasDecoder = class(TThread)
   private
+    m_hwndCaller      : HWND;
+    m_nAllowDecode    : Boolean;
+    m_lstFiles        : TStrings;
+    m_dSampleRate     : Single;
+    m_lstCasTracks    : TList<TCasTrack>;
+
     procedure ExecuteAndWait (a_strCommand : String);
 
+  protected
+    procedure Execute; override;
+
   public
-    function CreateTrack(a_aobInputPCMData : TBytes) : TCasTrack;
-    function DecodeFile (a_strFileName : String; a_dSampleRate : Double) : TCasTrack;
+    constructor Create;
+    destructor Destroy; override;
+
+    function  CreateTrack    (a_aobInputPCMData : TBytes) : TCasTrack;
+    function  DecodeFile     (a_strFileName : String; a_dSampleRate : Double) : TCasTrack;
+    procedure AsyncDecodeFile(a_hwndCaller : HWND; a_lstFiles : TStrings; a_dSampleRate : Double);
+
+    property Tracks : TList<TCasTrack> read m_lstCasTracks write m_lstCasTracks;
 
   end;
 
 implementation
 
 uses
-  Winapi.Windows,
   Math,
   CasConstantsU;
+
+//==============================================================================
+constructor TCasDecoder.Create;
+begin
+  m_nAllowDecode    := False;
+  m_lstFiles        := nil;
+  m_dSampleRate     := -1;
+  m_lstCasTracks    := TList<TCasTrack>.Create;
+
+  Inherited Create(False);
+end;
+
+//==============================================================================
+destructor TCasDecoder.Destroy;
+var
+  CasTrack : TCasTrack;
+begin
+  for CasTrack in m_lstCasTracks do
+    CasTrack.Free;
+
+  m_lstCasTracks.Free;
+
+  Terminate;
+
+  Inherited;
+end;
+
+//==============================================================================
+procedure TCasDecoder.Execute;
+var
+  strFileName : String;
+begin
+  NameThreadForDebugging('CasDecoder');
+
+  while (not Terminated) do
+  begin
+    Sleep(10);  // Later: Set a event and use WaitFor
+    if m_nAllowDecode then
+    begin
+      for strFileName in m_lstFiles do
+        m_lstCasTracks.Add(DecodeFile(strFileName, m_dSampleRate));
+
+      PostMessage(m_hwndCaller, CM_NotifyDecode, 0, 0);
+
+      m_dSampleRate  := -1;
+      m_hwndCaller   := 0;
+      m_nAllowDecode := False;
+    end;
+  end;
+end;
+
+//==============================================================================
+procedure TCasDecoder.AsyncDecodeFile(a_hwndCaller : HWND; a_lstFiles : TStrings; a_dSampleRate : Double);
+begin
+  m_dSampleRate := a_dSampleRate;
+  m_hwndCaller  := a_hwndCaller;
+  m_lstFiles    := a_lstFiles;
+
+  m_nAllowDecode := True;
+end;
 
 //==============================================================================
 function TCasDecoder.DecodeFile(a_strFileName : String; a_dSampleRate : Double)  : TCasTrack;
@@ -83,14 +159,16 @@ begin
 
     // Two's complement:
     if (pData.Left[nSampleIdx]  >= Power(2, c_nBitDepth - 1)) then
-       pData.Left[nSampleIdx]  := pData.Left[nSampleIdx]  - Trunc(Power(2, c_nBitDepth));
+      pData.Left[nSampleIdx]  := pData.Left[nSampleIdx]  - Trunc(Power(2, c_nBitDepth));
 
     if (pData.Right[nSampleIdx] >= Power(2, c_nBitDepth - 1)) then
-       pData.Right[nSampleIdx] := pData.Right[nSampleIdx] - Trunc(Power(2, c_nBitDepth));
+      pData.Right[nSampleIdx] := pData.Right[nSampleIdx] - Trunc(Power(2, c_nBitDepth));
   end;
 
   Result := TCasTrack.Create;
   Result.RawData := pData;
+
+  SetLength(a_aobInputPCMData, 0);
 end;
 
 //==============================================================================

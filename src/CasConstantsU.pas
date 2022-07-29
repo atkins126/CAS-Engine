@@ -11,6 +11,7 @@ const
   // Messages:
   CM_ASIO             = WM_User + 100;
   CM_NotifyOwner      = CM_ASIO + 1;
+  CM_NotifyDecode     = CM_ASIO + 2;
 
   // Constants:
   AM_ResetRequest         = 0;
@@ -25,17 +26,12 @@ const
   c_nBytesInSample  = 6;
 
   // Numerical
-  FLT_EPS = 0.000001;
+  FLT_EPS    = 0.000001;
+  HOUR_SEC   = 3600;
+  MINUTE_SEC = 60;
 
-type
-  TNotificationType = (ntBuffersCreated,
-                       ntBuffersDestroyed,
-                       ntBuffersUpdated,
-                       ntDriverClosed,
-                       ntRequestedReset);
-
-  TIntArray = Array of Integer;
-  PIntArray = ^TIntArray;
+  c_nDefaultSampleRate = 44100;
+  c_nDefaultBufSize    = 3000;
 
 implementation
 

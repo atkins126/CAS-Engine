@@ -8,11 +8,10 @@ uses
   System.Generics.Collections,
   CasTrackU,
   CasConstantsU,
+  CasTypesU,
   CasMixerU,
   CasDatabaseU,
   CasPlaylistU,
-  AsioList,
-  Asio,
   VCL.ExtCtrls;
 
 type
@@ -24,35 +23,21 @@ type
     m_Owner                      : TObject;
     m_MainMixer                  : TCasMixer;
     m_tmrUpdateInfo              : TTimer;
+    m_dtDriverType               : TDriverType;
 
     m_CasDatabase                : TCasDatabase;
     m_CasPlaylist                : TCasPlaylist;
 
     m_nIdCount                   : Integer;
-    m_nCurrentBufferSize         : Integer;
     m_bBlockBufferPositionUpdate : Boolean;
-    m_bFileLoaded                : Boolean;
-    m_bBuffersCreated            : Boolean;
-    m_bIsStarted                 : Boolean;
     m_bOwnerUpToDate             : Boolean;
 
-    m_RightBuffer                : TIntArray;
-    m_LeftBuffer                 : TIntArray;
-
-    m_AsioDriver                 : TOpenAsio;
-    m_DriverList                 : TAsioDriverList;
-    m_Callbacks                  : TASIOCallbacks;
-    m_BufferInfo                 : PAsioBufferInfo;
-    m_BufferTime                 : TAsioTime;
-    m_ChannelInfos               : Array[0..1] of TASIOChannelInfo;
+    m_AudioDriver                : IAudioDriver;
 
     procedure OnUpdateInfoTimer(Sender: TObject);
     procedure ProcessMessage(var MsgRec: TMessage);
     procedure InitializeVariables;
-    procedure CloseDriver;
-    procedure CalculateBuffers;
-    procedure CreateBuffers;
-    procedure DestroyBuffers;
+    procedure FreeDriver;
 
   public
     constructor Create(a_Owner : TObject; a_Handle : HWND = 0);
@@ -71,41 +56,43 @@ type
     function  GetProgress   : Double;
     function  GetLength     : Integer;
     function  GetReady      : Boolean;
+    function  GetPlaying    : Boolean;
     function  GetSampleRate : Double;
-
+    function  GetBufferSize : Cardinal;
+    function  GetTime       : String;
+    function  GetDuration   : String;
     function  GenerateID    : Integer;
 
-    procedure SetLevel   (a_dLevel : Double);
-    procedure SetPosition(a_nPosition : Integer);
+    procedure ControlPanel;
+    procedure SetLevel     (a_dLevel : Double);
+    procedure SetPosition  (a_nPosition : Integer);
+    procedure ChangeDriver (a_dtDriverType : TDriverType; a_nID : Integer);
 
     function  AddTrackToPlaylist(a_nTrackId, a_nPosition : Integer) : Boolean;
-
     function  AddTrack(a_CasTrack : TCasTrack; a_nMixerId : Integer) : Boolean;
     procedure ClearTracks;
-    procedure ChangeDriver(a_nID : Integer);
+    procedure CalculateBuffers(a_LeftOut : PIntArray; a_RightOut : PIntArray);
 
-    procedure BufferSwitch         (a_nIndex : Integer);
-    procedure BufferSwitchTimeInfo (a_nIndex : Integer; const Params : TAsioTime);
 
-    procedure CMAsio(var Message: TMessage); message CM_ASIO;
+    property Driver      : IAudioDriver     read m_AudioDriver  write m_AudioDriver;
+    property DriverType  : TDriverType      read m_dtDriverType write m_dtDriverType;
+    property Level       : Double           read GetLevel       write SetLevel;
+    property Position    : Integer          read GetPosition    write SetPosition;
 
-    property Level      : Double    read GetLevel     write SetLevel;
-    property Position   : Integer   read GetPosition  write SetPosition;
-    property Progress   : Double    read GetProgress;
-    property Length     : Integer   read GetLength;
+    property Playlist    : TCasPlaylist     read m_CasPlaylist  write m_CasPlaylist;
+    property Database    : TCasDatabase     read m_CasDatabase  write m_CasDatabase;
+    property MainMixer   : TCasMixer        read m_MainMixer    write m_MainMixer;
+    property Handle      : HWND             read m_hwndHandle   write m_hwndHandle;
 
-    property Ready      : Boolean   read GetReady;
-    property Playing    : Boolean   read m_bIsStarted;
-    property BuffersOn  : Boolean   read m_bBuffersCreated;
-    property SampleRate : Double    read GetSampleRate;
+    property Progress    : Double           read GetProgress;
+    property Length      : Integer          read GetLength;
+    property Time        : String           read GetTime;
+    property Duration    : String           read GetDuration;
 
-    property Playlist   : TCasPlaylist read m_CasPlaylist write m_CasPlaylist;
-    property Database   : TCasDatabase read m_CasDatabase write m_CasDatabase;
-    property AsioDriver : TOpenAsio    read m_AsioDriver  write m_AsioDriver;
-    property MainMixer  : TCasMixer    read m_MainMixer   write m_MainMixer;
-
-    property BufferTime : TAsioTime read m_BufferTime write m_BufferTime;
-    property Handle     : HWND      read m_hwndHandle write m_hwndHandle;
+    property Ready       : Boolean          read GetReady;
+    property Playing     : Boolean          read GetPlaying;
+    property SampleRate  : Double           read GetSampleRate;
+    property BufferSize  : Cardinal         read GetBufferSize;
 
   end;
 
@@ -119,83 +106,17 @@ uses
   System.Classes,
   System.SysUtils,
   CasBasicFxU,
+  CasDirectSoundU,
+  CasAsioU,
   CasUtilsU,
   Math;
 
-
-//==============================================================================
-procedure AsioBufferSwitch(DoubleBufferIndex: LongInt; DirectProcess: TASIOBool); cdecl;
-begin
-  case DirectProcess of
-    ASIOFalse :  PostMessage(CasEngine.Handle, CM_ASIO, AM_BufferSwitch, DoubleBufferIndex);
-    ASIOTrue  :  CasEngine.BufferSwitch(DoubleBufferIndex);
-  end;
-end;
-
-//==============================================================================s
-function AsioMessage(Selector, Value: LongInt; message: Pointer; Ppt: PDouble): LongInt; cdecl;
-begin
-  Result := 0;
-
-  case Selector of
-    kAsioSelectorSupported :
-      begin
-        case Value of
-          kAsioEngineVersion        :  Result := 1;
-          kAsioResetRequest         :  Result := 1;
-          kAsioBufferSizeChange     :  Result := 0;
-          kAsioResyncRequest        :  Result := 1;
-          kAsioLatenciesChanged     :  Result := 1;
-          kAsioSupportsTimeInfo     :  Result := 1;
-          kAsioSupportsTimeCode     :  Result := 1;
-          kAsioSupportsInputMonitor :  Result := 0;
-        end;
-      end;
-    kAsioEngineVersion :  Result := 2;
-    kAsioResetRequest  :
-      begin
-        PostMessage(CasEngine.Handle, CM_ASIO, AM_ResetRequest, 0);
-        Result := 1;
-      end;
-    kAsioBufferSizeChange :
-      begin
-        PostMessage(CasEngine.Handle, CM_ASIO, AM_ResetRequest, 0);
-        Result := 1;
-      end;
-    kAsioResyncRequest    : ;
-    kAsioLatenciesChanged :
-      begin
-        PostMessage(CasEngine.Handle, CM_ASIO, AM_LatencyChanged, 0);
-        Result := 1;
-      end;
-    kAsioSupportsTimeInfo     : Result := 1;
-    kAsioSupportsTimeCode     : Result := 0;
-    kAsioSupportsInputMonitor : ;
-  end;
-end;
-
-//==============================================================================
-function AsioBufferSwitchTimeInfo(var Params: TASIOTime; DoubleBufferIndex: LongInt; DirectProcess: TASIOBool): PASIOTime; cdecl;
-begin
-  case directProcess of
-    ASIOFalse :
-      begin
-        CasEngine.BufferTime := Params;
-        PostMessage(CasEngine.Handle, CM_ASIO, AM_BufferSwitchTimeInfo, DoubleBufferIndex);
-      end;
-    ASIOTrue  : CasEngine.BufferSwitchTimeInfo(DoubleBufferIndex, Params);
-  end;
-
-  Result := nil;
-end;
 
 //==============================================================================
 constructor TCasEngine.Create(a_Owner : TObject; a_Handle : HWND = 0);
 begin
   m_Owner     := a_Owner;
   m_hwndOwner := a_Handle;
-  CasEngine   := Self;
-  m_nIdCount  := 0;
 
   InitializeVariables;
 end;
@@ -203,12 +124,12 @@ end;
 //==============================================================================
 destructor TCasEngine.Destroy;
 begin
-  if m_AsioDriver <> nil then
-    m_AsioDriver.Destroy;
   DestroyWindow(m_hwndHandle);
 
   m_tmrUpdateInfo.Enabled := False;
   m_tmrUpdateInfo.Free;
+
+  FreeDriver;
 
   Inherited;
 end;
@@ -216,6 +137,7 @@ end;
 //==============================================================================
 procedure TCasEngine.InitializeVariables;
 begin
+  CasEngine    := Self;
   m_hwndHandle := AllocateHWnd(ProcessMessage);
 
   m_tmrUpdateInfo := TTimer.Create(nil);
@@ -223,31 +145,21 @@ begin
   m_tmrUpdateInfo.OnTimer := OnUpdateInfoTimer;
   m_tmrUpdateInfo.Enabled := True;
 
-  m_CasDatabase := TCasDatabase.Create;
-  m_CasPlaylist := TCasPlaylist.Create(m_CasDatabase);
-  m_CasPlaylist.Position := 0;
-
   m_MainMixer       := TCasMixer.Create;
   m_MainMixer.ID    := 0;
   m_MainMixer.Level := 1;
 
+  m_CasDatabase := TCasDatabase.Create;
   m_CasDatabase.AddMixer(m_MainMixer);
+  m_CasPlaylist := TCasPlaylist.Create(m_CasDatabase);
+  m_CasPlaylist.Position := 0;
 
-  m_Callbacks.BufferSwitch         := AsioBufferSwitch;
-  m_Callbacks.AsioMessage          := AsioMessage;
-  m_Callbacks.BufferSwitchTimeInfo := AsioBufferSwitchTimeInfo;
+  m_nIdCount      := 0;
+  m_AudioDriver  := nil;
+  m_dtDriverType := dtNone;
 
-  m_AsioDriver := nil;
-  m_BufferInfo := nil;
-
-  m_bFileLoaded                := False;
-  m_bBuffersCreated            := False;
-  m_bIsStarted                 := False;
   m_bBlockBufferPositionUpdate := False;
   m_bOwnerUpToDate             := True;
-
-  SetLength(m_DriverList, 0);
-  ListAsioDrivers(m_DriverList);
 end;
 
 //==============================================================================
@@ -308,18 +220,32 @@ begin
 end;
 
 //==============================================================================
-procedure TCasEngine.ChangeDriver(a_nID : Integer);
+procedure TCasEngine.FreeDriver;
 begin
-  if m_AsioDriver <> nil then
-    CloseDriver;
+  if (m_AudioDriver <> nil) then
+    m_AudioDriver := nil;
+end;
 
-  if a_nID >= 0 then
+//==============================================================================
+procedure TCasEngine.ChangeDriver(a_dtDriverType : TDriverType; a_nID : Integer);
+begin
+  m_dtDriverType := a_dtDriverType;
+
+  //////////////////////////////////////////////////////////////////////////////
+  ///  Close running drivers
+  FreeDriver;
+
+  //////////////////////////////////////////////////////////////////////////////
+  ///  Open new driver
+  if m_AudioDriver = nil then
   begin
-    m_AsioDriver := TOpenAsio.Create(m_DriverList[a_nID].Id);
-    if (m_AsioDriver <> nil) then
-      if not Succeeded(m_AsioDriver.Init(Handle))
-        then m_AsioDriver := nil
-        else CreateBuffers;
+    case a_dtDriverType of
+      dtASIO        : m_AudioDriver := TCasAsio.Create(Self);
+      dtDirectSound : m_AudioDriver := TCasDirectSound.Create(Self);
+    end;
+
+    if m_AudioDriver <> nil then
+      m_AudioDriver.InitDriver(a_nID);
   end;
 end;
 
@@ -336,103 +262,7 @@ begin
 end;
 
 //==============================================================================
-procedure TCasEngine.CMAsio(var Message: TMessage);
-var
-   inp, outp: integer;
-begin
-  case Message.WParam of
-    AM_ResetRequest         :  NotifyOwner(ntRequestedReset);
-    AM_BufferSwitch         :  BufferSwitch(Message.LParam);
-    AM_BufferSwitchTimeInfo :  BufferSwitchTimeInfo(Message.LParam, m_BufferTime);
-    AM_LatencyChanged       :
-      if (m_AsioDriver <> nil) then
-      begin
-        m_AsioDriver.GetLatencies(inp, outp);
-      end;
-  end;
-end;
-
-//==============================================================================
-procedure TCasEngine.BufferSwitch(a_nIndex : Integer);
-begin
-  FillChar(m_BufferTime, SizeOf(TAsioTime), 0);
-
-  if m_AsioDriver.GetSamplePosition(m_BufferTime.TimeInfo.SamplePosition, m_BufferTime.TimeInfo.SystemTime) = ASE_OK then
-    m_BufferTime.TimeInfo.Flags := kSystemTimeValid or kSamplePositionValid;
-
-  BufferSwitchTimeInfo(a_nIndex, m_BufferTime)
-end;
-
-//==============================================================================
-procedure TCasEngine.BufferSwitchTimeInfo(a_nIndex : Integer; const Params : TAsioTime);
-var
-   nChannelIdx              : Integer;
-   nBufferIdx               : Integer;
-   Info                     : PAsioBufferInfo;
-   OutputInt32              : PInteger;
-begin
-  if (m_CasPlaylist.Position < m_CasPlaylist.Length - m_nCurrentBufferSize * m_CasPlaylist.Speed) then
-  begin
-    Info := m_BufferInfo;
-
-    CalculateBuffers;
-
-    for nChannelIdx := 0 to c_nChannelCount - 1 do
-    begin
-      case m_ChannelInfos[nChannelIdx].vType of
-        ASIOSTInt16MSB   : ;
-        ASIOSTInt24MSB   : ;
-        ASIOSTInt32MSB   : ;
-        ASIOSTFloat32MSB : ;
-        ASIOSTFloat64MSB : ;
-
-        ASIOSTInt32MSB16 : ;
-        ASIOSTInt32MSB18 : ;
-        ASIOSTInt32MSB20 : ;
-        ASIOSTInt32MSB24 : ;
-
-        ASIOSTInt16LSB   : ;
-        ASIOSTInt24LSB   : ;
-        ASIOSTInt32LSB   :
-          begin
-            OutputInt32 := Info^.Buffers[a_nIndex];
-            for nBufferIdx := 0 to m_nCurrentBufferSize-1 do
-            begin
-              if nChannelIdx = 0 then
-              begin
-                OutputInt32^ := Trunc(Power(2, 32 - c_nBitDepth) * m_LeftBuffer[nBufferIdx]);
-              end
-              else
-              begin
-                OutputInt32^ := Trunc(Power(2, 32 - c_nBitDepth) * m_RightBuffer[nBufferIdx]);
-              end;
-
-              Inc(OutputInt32);
-            end;
-          end;
-        ASIOSTFloat32LSB : ;
-        ASIOSTFloat64LSB : ;
-        ASIOSTInt32LSB16 : ;
-        ASIOSTInt32LSB18 : ;
-        ASIOSTInt32LSB20 : ;
-        ASIOSTInt32LSB24 : ;
-      end;
-
-      Inc(Info);
-    end;
-
-    m_AsioDriver.OutputReady;
-  end
-  else
-  begin
-    m_CasPlaylist.Position := 0;
-  end;
-
-  m_bOwnerUpToDate := False;
-end;
-
-//==============================================================================
-procedure TCasEngine.CalculateBuffers;
+procedure TCasEngine.CalculateBuffers(a_LeftOut : PIntArray; a_RightOut : PIntArray);
 var
   nBufferIdx  : Integer;
   nPosition   : Integer;
@@ -440,6 +270,7 @@ var
   nTrackID    : Integer;
   nMixerIdx   : Integer;
   nBufInSize  : Integer;
+  nBufEndPos  : Integer;
   dGap        : Double;
   CasTrack    : TCasTrack;
   CasMixer    : TCasMixer;
@@ -447,195 +278,135 @@ var
   RightMaster : TIntArray;
   LeftTrack   : TIntArray;
   RightTrack  : TIntArray;
-begin
-  // The gap variable is used in order to prevent distortion when changing the
-  // speed of playlist. It enables the interpolation algorithm to determine
-  // which value goes first in the buffer.
-  dGap := (1-Frac(m_CasPlaylist.RelPos))/m_CasPlaylist.Speed;
 
-  nBufInSize := Ceil((m_nCurrentBufferSize - dGap) * m_CasPlaylist.Speed) + 2;
-
-  SetLength(m_LeftBuffer,  m_nCurrentBufferSize);
-  SetLength(m_RightBuffer, m_nCurrentBufferSize);
-  SetLength(LeftMaster,    nBufInSize);
-  SetLength(RightMaster,   nBufInSize);
-  SetLength(LeftTrack,     nBufInSize);
-  SetLength(RightTrack,    nBufInSize);
-
-  // Clear buffers:
-  for nBufferIdx := 0 to m_nCurrentBufferSize - 1 do
+  //////////////////////////////////////////////////////////////////////////////
+  ///  This procedure requires initialized data
+  procedure AddTrackToBuffer;
+  var
+    nBufferIdx : Integer;
   begin
-    m_LeftBuffer [nBufferIdx] := 0;
-    m_RightBuffer[nBufferIdx] := 0;
+    InterpolateRT(@(CasTrack.RawData.Left),
+                  @(CasTrack.RawData.Right),
+                  @LeftTrack,
+                  @RightTrack,
+                  CasTrack.Size,
+                  nBufInSize,
+                  1,
+                  nPosition);
+
+    for nBufferIdx := 0 to nBufInSize - 1 do
+    begin
+      LeftMaster [nBufferIdx] := LeftMaster[nBufferIdx]  +
+        Trunc(CasMixer.Level * LeftTrack [nBufferIdx]);
+
+      RightMaster[nBufferIdx] := RightMaster[nBufferIdx] +
+        Trunc(CasMixer.Level * RightTrack[nBufferIdx]);
+    end;
   end;
 
-  // For each mixer, get all linked tracks and add them to the buffer:
-  for nMixerIdx := 0 to m_CasDatabase.Mixers.Count - 1 do
+begin
+  if m_CasPlaylist.Speed > 0 then
   begin
-    CasMixer := m_CasDatabase.Mixers.Items[nMixerIdx];
-    for nTrackIdx := 0 to CasMixer.Tracks.Count - 1 do
+    // The gap variable is used in order to prevent distortion when changing the
+    // speed of playlist. It enables the interpolation algorithm to determine
+    // which value goes first in the buffer.
+    dGap := (1 - Frac(m_CasPlaylist.RelPos)) / m_CasPlaylist.Speed;
+
+    nBufInSize := Ceil((BufferSize - dGap) * m_CasPlaylist.Speed) + 2;
+
+    SetLength(TIntArray(a_LeftOut^),  BufferSize);
+    SetLength(TIntArray(a_RightOut^), BufferSize);
+
+    SetLength(LeftMaster,    nBufInSize);
+    SetLength(RightMaster,   nBufInSize);
+    SetLength(LeftTrack,     nBufInSize);
+    SetLength(RightTrack,    nBufInSize);
+
+    // Clear buffers:
+    for nBufferIdx := 0 to BufferSize - 1 do
     begin
-      nTrackID := CasMixer.Tracks.Items[nTrackIdx];
-      if m_CasDatabase.GetTrackById(nTrackID, CasTrack) then
+      TIntArray(a_LeftOut^) [nBufferIdx] := 0;
+      TIntArray(a_RightOut^)[nBufferIdx] := 0;
+    end;
+
+    // For each mixer, get all linked tracks:
+    for nMixerIdx := 0 to m_CasDatabase.Mixers.Count - 1 do
+    begin
+      CasMixer := m_CasDatabase.Mixers.Items[nMixerIdx];
+      for nTrackIdx := 0 to CasMixer.Tracks.Count - 1 do
       begin
-        // If track's position is positive a is in the playlist:
-        if (CasTrack.Position >= 0) then
+        nTrackID := CasMixer.Tracks.Items[nTrackIdx];
+        if m_CasDatabase.GetTrackById(nTrackID, CasTrack) then
         begin
-          nPosition := Trunc(m_CasPlaylist.RelPos) - CasTrack.Position;
-
-          // If playlist reached track's position, plays:
-          if (nPosition >= 0) and
-             (nPosition < CasTrack.Size - nBufInSize) then
+          // If the track's position is not -1, it's in the playlist:
+          if (CasTrack.Position >= 0) then
           begin
-            InterpolateRT(@(CasTrack.RawData.Left),
-                          @(CasTrack.RawData.Right),
-                          @LeftTrack,
-                          @RightTrack,
-                          CasTrack.Size,
-                          nBufInSize,
-                          1,
-                          nPosition);
+            // If track is within buffer range its data is added:
+            nPosition := Trunc(m_CasPlaylist.RelPos) - CasTrack.Position;
+            if (nPosition + nBufInSize >= 0) then
+              AddTrackToBuffer;
 
-            for nBufferIdx := 0 to nBufInSize - 1 do
-            begin
-              LeftMaster [nBufferIdx] := LeftMaster[nBufferIdx]  +
-                Trunc(CasMixer.Level * LeftTrack [nBufferIdx]);
+            // If playlist reached the end but the buffer still not full, the
+            // tracks at the beginning are added too:
+            nBufEndPos := m_CasPlaylist.Position + nBufInSize - m_CasPlaylist.Length;
+            nPosition  := Trunc(m_CasPlaylist.RelPos) - (CasTrack.Position + m_CasPlaylist.Length);
+            if (nBufEndPos >= 0) and (CasTrack.Position < nBufEndPos) then
+              AddTrackToBuffer;
 
-              RightMaster[nBufferIdx] := RightMaster[nBufferIdx] +
-                Trunc(CasMixer.Level * RightTrack[nBufferIdx]);
-            end;
+            // Note: theoretically there could be a buffer that is two or more
+            // times bigger than the track's length, in that case we should add
+            // the track more times in the same buffer. That could be a future
+            // improvement.
           end;
         end;
       end;
     end;
-  end;
 
-  // Interpolate whole playlist:
-  InterpolateRT(@LeftMaster,
-                @RightMaster,
-                @m_LeftBuffer,
-                @m_RightBuffer,
-                nBufInSize,
-                m_nCurrentBufferSize,
-                m_CasPlaylist.Speed,
-                0,
-                dGap);
+    // Interpolate whole playlist:
+    InterpolateRT(@LeftMaster,
+                  @RightMaster,
+                  a_LeftOut,
+                  a_RightOut,
+                  nBufInSize,
+                  BufferSize,
+                  m_CasPlaylist.Speed,
+                  0,
+                  dGap);
 
-  m_CasPlaylist.RelPos := m_CasPlaylist.RelPos + m_nCurrentBufferSize * m_CasPlaylist.Speed;
-end;
+    // Update playlist's position:
+    m_CasPlaylist.RelPos := m_CasPlaylist.RelPos + BufferSize * m_CasPlaylist.Speed;
 
-//==============================================================================
-procedure TCasEngine.CreateBuffers;
-var
-   nMin          : Integer;
-   nMax          : Integer;
-   nPref         : Integer;
-   nGran         : Integer;
-   nChannelIdx   : Integer;
-   Currentbuffer : PAsioBufferInfo;
-begin
-  if (m_AsioDriver <> nil) then
-  begin
-    if m_bBuffersCreated then
-      DestroyBuffers;
+    // If the position of the playlist's exceeded it's length, the tracks at the
+    // beginning already have been considered, so the position doesn't go back to
+    // zero. Instead it goes pass the start:
+    while m_CasPlaylist.RelPos > m_CasPlaylist.Length do
+      m_CasPlaylist.RelPos := m_CasPlaylist.RelPos - m_CasPlaylist.Length;
 
-    m_AsioDriver.GetBufferSize(nMin, nMax, nPref, nGran);
-    GetMem(m_BufferInfo, SizeOf(TAsioBufferInfo)*c_nChannelCount);
-    Currentbuffer := m_BufferInfo;
-
-    for nChannelIdx := 0 to c_nChannelCount - 1 do
-    begin
-      Currentbuffer^.IsInput     := ASIOFalse;
-      Currentbuffer^.ChannelNum  := nChannelIdx;
-      Currentbuffer^.Buffers[0] := nil;
-      Currentbuffer^.Buffers[1] := nil;
-      Inc(Currentbuffer);
-    end;
-
-    m_bBuffersCreated := (m_AsioDriver.CreateBuffers(m_BufferInfo, c_nChannelCount, nPref, m_Callbacks) = ASE_OK);
-    if m_bBuffersCreated then
-      m_nCurrentBufferSize := nPref
-    else
-      m_nCurrentBufferSize := 0;
-
-    NotifyOwner(ntBuffersCreated);
-
-    if m_AsioDriver <> nil then
-    begin
-      if m_bBuffersCreated then
-      begin
-        for nChannelIdx := 0 to c_nChannelCount - 1 do
-        begin
-          m_ChannelInfos[nChannelIdx].Channel := nChannelIdx;
-          m_ChannelInfos[nChannelIdx].IsInput := ASIOFalse;
-          m_AsioDriver.GetChannelInfo(m_ChannelInfos[nChannelIdx]);
-        end;
-      end;
-    end;
-  end;
-end;
-
-//==============================================================================
-procedure TCasEngine.DestroyBuffers;
-begin
-  if (m_AsioDriver <> nil) and m_bBuffersCreated then
-  begin
-    FreeMem(m_BufferInfo);
-    m_AsioDriver.DisposeBuffers;
-
-    m_BufferInfo         := nil;
-    m_bBuffersCreated    := False;
-    m_nCurrentBufferSize := 0;
-
-    NotifyOwner(ntBuffersDestroyed);
-  end;
-end;
-
-//==============================================================================
-procedure TCasEngine.CloseDriver;
-begin
-  if m_AsioDriver <> nil then
-  begin
-    if m_bIsStarted then
-      Stop;
-
-    if m_bBuffersCreated then
-      DestroyBuffers;
-
-    m_AsioDriver := nil;
-  end;
-
-  NotifyOwner(ntDriverClosed);
+    m_bOwnerUpToDate := False;
+  end
 end;
 
 //==============================================================================
 procedure TCasEngine.Play;
 begin
-  if m_AsioDriver <> nil then
-    m_bIsStarted := (m_AsioDriver.Start = ASE_OK);
+  if m_AudioDriver <> nil then
+    m_AudioDriver.Play;
 end;
 
 //==============================================================================
 procedure TCasEngine.Pause;
 begin
-  if m_AsioDriver <> nil then
-  begin
-    if m_bIsStarted then
-    begin
-      m_AsioDriver.Stop;
-      m_bIsStarted := False;
-    end;
-  end;
+  if m_AudioDriver <> nil then
+    m_AudioDriver.Pause;
 end;
 
 //==============================================================================
 procedure TCasEngine.Stop;
 begin
-  if m_AsioDriver <> nil then
-  begin
-    Pause;
-    m_CasPlaylist.Position := 0;
-  end;
+  if m_AudioDriver <> nil then
+    m_AudioDriver.Stop;
+
+  m_CasPlaylist.Position := 0;
 end;
 
 //==============================================================================
@@ -644,7 +415,7 @@ var
   nIndex : Integer;
   nPos   : Integer;
 begin
-  if m_AsioDriver <> nil then
+  if m_AudioDriver <> nil then
   begin
     nPos := 0;
 
@@ -664,7 +435,7 @@ var
   nIndex : Integer;
   nPos   : Integer;
 begin
-  if m_AsioDriver <> nil then
+  if m_AudioDriver <> nil then
   begin
     nPos := MaxInt;
 
@@ -675,6 +446,16 @@ begin
     end;
 
     m_CasPlaylist.Position := nPos;
+  end;
+end;
+
+//==============================================================================
+procedure TCasEngine.ControlPanel;
+begin
+  if (m_AudioDriver <> nil) then
+  begin
+    if m_AudioDriver is TCasAsio then
+      TCasAsio(m_AudioDriver).ControlPanel
   end;
 end;
 
@@ -714,20 +495,54 @@ end;
 //==============================================================================
 function TCasEngine.GetReady : Boolean;
 begin
-  Result := m_AsioDriver <> nil;
+  Result := (m_AudioDriver <> nil);
 end;
+
+//==============================================================================
+function TCasEngine.GetPlaying : Boolean;
+begin
+  Result := (m_AudioDriver <> nil) and m_AudioDriver.Playing;
+end;
+
 
 //==============================================================================
 function TCasEngine.GetSampleRate : Double;
 begin
-  if Ready then
-  begin
-    try
-      m_AsioDriver.GetSampleRate(Result);
-    except
-      Result := 0;
-    end;
-  end;
+  Result := c_nDefaultSampleRate;
+
+  if m_AudioDriver <> nil then
+    Result := m_AudioDriver.SampleRate;
+end;
+
+//==============================================================================
+function TCasEngine.GetBufferSize : Cardinal;
+begin
+  Result := c_nDefaultBufSize;
+
+  if m_AudioDriver <> nil then
+    Result := m_AudioDriver.BufferSize;
+end;
+
+//==============================================================================
+function TCasEngine.GetTime : String;
+var
+  dSampleRate : Double;
+begin
+  dSampleRate := GetSampleRate;
+
+  if dSampleRate > 0 then
+    Result := TimeString(Trunc(1000 * (m_CasPlaylist.Position / dSampleRate)));
+end;
+
+//==============================================================================
+function TCasEngine.GetDuration : String;
+var
+  dSampleRate : Double;
+begin
+  dSampleRate := GetSampleRate;
+
+  if dSampleRate > 0 then
+    Result := TimeString(Trunc(1000 * (m_CasPlaylist.Length / dSampleRate)));
 end;
 
 //==============================================================================
