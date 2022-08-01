@@ -12,9 +12,10 @@ type
   TCasPlaylist = class
 
   private
-    m_dPosition : Double;
-    m_dSpeed    : Double;
-    m_lstTracks : TList<Integer>;
+    m_dPosition  : Double;
+    m_dSpeed     : Double;
+    m_lstTracks  : TList<Integer>;
+    m_lstActTrks : TList<Integer>;
 
     m_CasDatabase : TCasDatabase;
 
@@ -31,12 +32,18 @@ type
     procedure AddTrack   (a_nID: Integer);
     procedure RemoveTrack(a_nID: Integer);
     procedure ClearTracks;
+    procedure GoToTrack  (a_nID: Integer);
+
+    function GetActiveTracks : TList<Integer>;
+    function GetTrackProgress(a_nTrackId : Integer) : Double;
 
     property Progress    : Double   read GetProgress;
     property Position    : Integer  read GetPosition   write SetPosition;
     property RelPos      : Double   read m_dPosition   write m_dPosition;
     property Length      : Integer  read GetLength;
     property Speed       : Double   read m_dSpeed      write m_dSpeed;
+
+    property ActiveTracks : TList<Integer> read GetActiveTracks;
 
   end;
 
@@ -54,12 +61,14 @@ begin
   m_dSpeed      := 1;
   m_CasDatabase := a_CasDatabase;
   m_lstTracks   := TList<Integer>.Create;
+  m_lstActTrks  := TList<Integer>.Create;
 end;
 
 //==============================================================================
 destructor TCasPlaylist.Destroy;
 begin
   m_lstTracks.Free;
+  m_lstActTrks.Free;
 
   Inherited;
 end;
@@ -84,7 +93,7 @@ begin
   nLength := GetLength;
 
   if nLength > 0 then
-    Result := m_dPosition / GetLength
+    Result := m_dPosition / nLength
   else
     Result := 0;
 end;
@@ -106,6 +115,43 @@ begin
 end;
 
 //==============================================================================
+function TCasPlaylist.GetActiveTracks : TList<Integer>;
+var
+  CasTrack  : TCasTrack;
+  nTrackIdx : Integer;
+begin
+  m_lstActTrks.Clear;
+
+  for nTrackIdx := 0 to m_lstTracks.Count - 1 do
+  begin
+    if m_CasDatabase.GetTrackById(m_lstTracks.Items[nTrackIdx], CasTrack) then
+    begin
+      if CasTrack.IsPlaying(m_dPosition) then
+        m_lstActTrks.Add(CasTrack.ID);
+    end;
+  end;
+
+  Result := m_lstActTrks;
+end;
+
+//==============================================================================
+function TCasPlaylist.GetTrackProgress(a_nTrackId : Integer) : Double;
+var
+  CasTrack  : TCasTrack;
+  nPosition : Integer;
+begin
+  Result := -1;
+
+  if m_CasDatabase.GetTrackById(a_nTrackId, CasTrack) then
+  begin
+    nPosition := Trunc(m_dPosition - CasTrack.Position);
+  
+    if CasTrack.IsPlaying(m_dPosition) then
+      Result := nPosition/CasTrack.Size;
+  end;
+end;
+
+//==============================================================================
 procedure TCasPlaylist.AddTrack(a_nID: Integer);
 begin
   m_lstTracks.Add(a_nID);
@@ -121,6 +167,19 @@ end;
 procedure TCasPlaylist.ClearTracks;
 begin
   m_lstTracks.Clear;
+end;
+
+//==============================================================================
+procedure TCasPlaylist.GoToTrack(a_nID: Integer);
+var
+  CasTrack : TCasTrack;
+begin
+  if m_lstTracks.IndexOf(a_nID) >= 0 then
+  begin
+    m_CasDatabase.GetTrackById(a_nID, CasTrack);
+  
+    Position := CasTrack.Position;
+  end;
 end;
 
 
